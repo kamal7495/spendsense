@@ -80,6 +80,16 @@ export interface CategorySpend {
   total: number;
 }
 
+/** Rows dated within the last `days` days of `now`. Shared by every windowed view on the dashboard. */
+export function filterByWindow(rows: InvoiceRow[], days: number, now: Date = new Date()): InvoiceRow[] {
+  const cutoff = new Date(now);
+  cutoff.setDate(cutoff.getDate() - days);
+  return rows.filter((row) => {
+    const d = parseDate(row.date);
+    return d !== null && d >= cutoff;
+  });
+}
+
 export function spendByCategory(rows: InvoiceRow[]): CategorySpend[] {
   const totals = new Map<Category, number>();
   for (const row of rows) {
@@ -338,9 +348,17 @@ export function groceryReorderReminders(rows: InvoiceRow[], now: Date = new Date
   return reminders.sort((a, b) => b.daysSinceLastOrder / b.avgIntervalDays - a.daysSinceLastOrder / a.avgIntervalDays);
 }
 
+export interface TransactionDetail {
+  date: string;
+  item: string;
+  amount: number;
+}
+
 export interface VendorSpend {
   vendor: string;
   total: number;
+  /** Individual line items behind this vendor's total, most recent first. */
+  transactions: TransactionDetail[];
 }
 
 export interface CategoryVendorBreakdown {
@@ -349,21 +367,29 @@ export interface CategoryVendorBreakdown {
   vendors: VendorSpend[];
 }
 
-/** For each category, which vendor/card the spend actually went through. */
+/** For each category, which vendor/card the spend actually went through, and the transactions behind it. */
 export function spendByCategoryAndVendor(rows: InvoiceRow[]): CategoryVendorBreakdown[] {
-  const byCategory = new Map<Category, Map<string, number>>();
+  const byCategory = new Map<Category, Map<string, TransactionDetail[]>>();
 
   for (const row of rows) {
-    const total = lineTotal(row);
     if (!byCategory.has(row.category)) byCategory.set(row.category, new Map());
     const byVendor = byCategory.get(row.category)!;
-    byVendor.set(row.vendor, (byVendor.get(row.vendor) ?? 0) + total);
+    const transactions = byVendor.get(row.vendor) ?? [];
+    transactions.push({ date: row.date, item: row.item, amount: lineTotal(row) });
+    byVendor.set(row.vendor, transactions);
   }
 
   return Array.from(byCategory.entries())
     .map(([category, byVendor]) => {
       const vendors = Array.from(byVendor.entries())
-        .map(([vendor, total]) => ({ vendor, total }))
+        .map(([vendor, transactions]) => {
+          const sorted = transactions.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+          return {
+            vendor,
+            total: sorted.reduce((sum, t) => sum + t.amount, 0),
+            transactions: sorted,
+          };
+        })
         .sort((a, b) => b.total - a.total);
       const total = vendors.reduce((sum, v) => sum + v.total, 0);
       return { category, total, vendors };

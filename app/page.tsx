@@ -1,18 +1,11 @@
 import { getInvoices } from "@/lib/sheets";
 import {
   compareThisMonthToLast,
-  frequentItems,
-  groceryReorderReminders,
-  healthSnapshot,
-  monthlyStaplesList,
+  filterByWindow,
   spendByCategory,
   spendByCategoryAndVendor,
 } from "@/lib/analytics";
 import CategoryBarChart from "@/components/CategoryBarChart";
-import HealthSnapshotCard from "@/components/HealthSnapshotCard";
-import MonthlyStaplesCard from "@/components/MonthlyStaplesCard";
-import GroceryRemindersCard from "@/components/GroceryRemindersCard";
-import FrequentItemsTable from "@/components/FrequentItemsTable";
 import CardUsageByCategoryCard from "@/components/CardUsageByCategoryCard";
 import DateRangeControl from "@/components/DateRangeControl";
 import { currency } from "@/lib/format";
@@ -23,6 +16,10 @@ function parseDays(raw: string | undefined): number {
   if (raw === "all") return 36500; // ~100 years, effectively "all time"
   const n = raw ? parseInt(raw, 10) : 60;
   return Number.isFinite(n) && n > 0 ? n : 60;
+}
+
+function windowLabel(daysParam: string): string {
+  return daysParam === "all" ? "All time" : `Last ${daysParam} days`;
 }
 
 export default async function DashboardPage({
@@ -37,10 +34,6 @@ export default async function DashboardPage({
   let thisMonth = 0;
   let lastMonth = 0;
   let categorySpend: ReturnType<typeof spendByCategory> = [];
-  let items: ReturnType<typeof frequentItems> = [];
-  let health: ReturnType<typeof healthSnapshot> | null = null;
-  let staples: ReturnType<typeof monthlyStaplesList> = [];
-  let reminders: ReturnType<typeof groceryReorderReminders> = [];
   let cardUsage: ReturnType<typeof spendByCategoryAndVendor> = [];
 
   try {
@@ -48,12 +41,9 @@ export default async function DashboardPage({
     const comparison = compareThisMonthToLast(invoices);
     thisMonth = comparison.thisMonth;
     lastMonth = comparison.lastMonth;
-    categorySpend = spendByCategory(invoices);
-    items = frequentItems(invoices, days);
-    health = healthSnapshot(invoices, days);
-    staples = monthlyStaplesList(invoices, days);
-    reminders = groceryReorderReminders(invoices); // always uses full history for interval accuracy
-    cardUsage = spendByCategoryAndVendor(invoices);
+    const inWindow = filterByWindow(invoices, days);
+    categorySpend = spendByCategory(inWindow);
+    cardUsage = spendByCategoryAndVendor(inWindow);
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load invoices";
   }
@@ -105,21 +95,13 @@ export default async function DashboardPage({
 
       <section className="rounded-lg border border-gray-200 bg-white p-4">
         <h2 className="text-base font-semibold">Spend by category</h2>
-        <p className="text-sm text-gray-500">All-time total per category</p>
+        <p className="text-sm text-gray-500">{windowLabel(daysParam)}, total per category</p>
         <div className="mt-4">
           <CategoryBarChart data={categorySpend} />
         </div>
       </section>
 
-      <CardUsageByCategoryCard breakdown={cardUsage} />
-
-      {health && <HealthSnapshotCard snapshot={health} />}
-
-      <GroceryRemindersCard reminders={reminders} />
-
-      <MonthlyStaplesCard staples={staples} windowDays={days} />
-
-      <FrequentItemsTable items={items} windowDays={days} />
+      <CardUsageByCategoryCard breakdown={cardUsage} windowLabel={windowLabel(daysParam)} />
     </div>
   );
 }
