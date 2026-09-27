@@ -5,8 +5,10 @@ import {
   spendByCategory,
   spendByCategoryAndVendor,
 } from "@/lib/analytics";
+import { cashFlowTimeline } from "@/lib/cashflow";
 import CategoryBarChart from "@/components/CategoryBarChart";
 import CardUsageByCategoryCard from "@/components/CardUsageByCategoryCard";
+import CashFlowCard from "@/components/CashFlowCard";
 import DateRangeControl from "@/components/DateRangeControl";
 import { currency } from "@/lib/format";
 
@@ -35,6 +37,7 @@ export default async function DashboardPage({
   let lastMonth = 0;
   let categorySpend: ReturnType<typeof spendByCategory> = [];
   let cardUsage: ReturnType<typeof spendByCategoryAndVendor> = [];
+  let cashFlow: ReturnType<typeof cashFlowTimeline> = [];
 
   try {
     const invoices = await getInvoices();
@@ -44,6 +47,7 @@ export default async function DashboardPage({
     const inWindow = filterByWindow(invoices, days);
     categorySpend = spendByCategory(inWindow);
     cardUsage = spendByCategoryAndVendor(inWindow);
+    cashFlow = cashFlowTimeline(invoices); // always full history, computes its own cycle windows
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load invoices";
   }
@@ -92,6 +96,8 @@ export default async function DashboardPage({
           </div>
         </div>
       </section>
+
+      <CashFlowCard events={cashFlow} />
 
       <section className="rounded-lg border border-gray-200 bg-white p-4">
         <h2 className="text-base font-semibold">Spend by category</h2>
