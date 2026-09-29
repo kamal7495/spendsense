@@ -927,11 +927,46 @@ function processAmazonOrders() {
 // --- Source 16: Coin by Zerodha SIP mutual fund allotments (investments) ----
 
 // Each email is a consolidated allotment report covering one or more funds
-// bought that cycle, as a markdown table: one row per fund, shaped
-// "| <fund name + folio/NAV/stamp-duty details> | ₹<amount> <units> units |".
+// bought that cycle. The email is HTML with a markdown-style table; the
+// Gmail API's own plain-text rendering keeps "| Fund ... | Amount |" rows,
+// but GmailApp.getPlainBody() strips every "|" and instead reflows each
+// table cell onto its own line (confirmed against real emails — same class
+// of renderer mismatch that broke the Amazon order parser). Whether the
+// fund name lands on its own line before "Folio no.:" or stays on the same
+// line depends on name length, and the amount is sometimes a whole rupee
+// figure with no decimal point at all (e.g. "₹59997") — so this parses by
+// chunking on each entry's trailing "<units> units" marker instead of
+// anchoring to a specific line layout, which is robust to both.
 // Tracked under the "investments" category, which is deliberately excluded
 // from the This month/Last month spend totals (see lib/analytics.ts) since
 // it's money moved into savings, not consumed.
+function parseZerodhaAllotments_(body) {
+  const afterHeader = body.split(/Allotment success|Purchase confirmation/)[1];
+  if (!afterHeader) return [];
+
+  const chunks = afterHeader.split(/[\d,]+\.\d+\s*units/);
+  const entryChunks = chunks.slice(0, -1); // last chunk is trailing footer text, not an entry
+
+  const rows = [];
+  entryChunks.forEach((chunk) => {
+    const folioIdx = chunk.indexOf("Folio no.:");
+    if (folioIdx === -1) return;
+
+    let fund = chunk.slice(0, folioIdx).replace(/^\s*Fund\s*Amount\s*/i, "").trim();
+    fund = fund.replace(/\s*\n\s*/g, " ").trim();
+
+    // The last ₹ amount in the chunk is the actual invested amount - NAV and
+    // Stamp Duty (both also ₹-prefixed) always appear earlier in the chunk.
+    const amountMatches = [...chunk.matchAll(/₹([\d,]+(?:\.\d+)?)/g)];
+    if (amountMatches.length === 0) return;
+    const amount = parseAmount_(amountMatches[amountMatches.length - 1][1]);
+
+    if (fund && Number.isFinite(amount) && amount > 0) rows.push({ fund, amount });
+  });
+
+  return rows;
+}
+
 function processZerodhaSipInvestments() {
   const processed = getOrCreateLabel_(PROCESSED_LABEL);
   const threads = GmailApp.search(
@@ -945,12 +980,77 @@ function processZerodhaSipInvestments() {
     thread.getMessages().forEach((message) => {
       const body = message.getPlainBody();
       const date = toIsoDate_(message.getDate());
-      const rows = [...body.matchAll(/\|\s*([^|]+?)\s*Folio no\.:[^|]*\|\s*₹([\d,.]+)\s+[\d.]+\s*units\s*\|/g)];
+      const rows = parseZerodhaAllotments_(body);
 
-      rows.forEach((match, i) => {
-        const fund = match[1].trim();
-        const amount = parseAmount_(match[2]);
-        appendInvoiceRow_(date, "Coin by Zerodha", "ZERODHA-" + message.getId() + "-" + i, fund, "investments", amount, 0);
+      rows.forEach((row, i) => {
+        appendInvoiceRow_(date, "Coin by Zerodha", "ZERODHA-" + message.getId() + "-" + i, row.fund, "investments", row.amount, 0);
+      });
+
+      if (rows.length > 0) {
+        message.getThread().addLabel(processed);
+      }
+    });
+  });
+}
+
+// --- Source 17: Coin by Zerodha SIP mutual fund redemptions (investments) ---
+
+// A redemption withdraws money OUT of a fund back to the bank account - the
+// reverse of an allotment. Recorded as a NEGATIVE amount under the same
+// "investments" category (not a new category or Income_Raw) so it nets
+// against contributions in any investments total: net invested = SIP
+// contributions minus redemptions, without a separate concept to track.
+// Real emails confirmed to have a different shape than allotments - no
+// "Folio no.:" at all, instead "<fund name> NAV: ₹<nav>" - plus a trailing
+// disclaimer row ("Amount will be credited directly to your bank account...")
+// that must NOT be mistaken for a fund entry; it has no "NAV:" or "<units>
+// units" marker, so it's naturally excluded rather than needing a special
+// case.
+function parseZerodhaRedemptions_(body) {
+  const afterHeader = body.split(/Redemption success/)[1];
+  if (!afterHeader) return [];
+
+  const chunks = afterHeader.split(/[\d,]+\.\d+\s*units/);
+  const entryChunks = chunks.slice(0, -1); // last chunk is trailing footer/disclaimer text
+
+  const rows = [];
+  entryChunks.forEach((chunk) => {
+    const navIdx = chunk.indexOf("NAV:");
+    if (navIdx === -1) return;
+
+    let fund = chunk.slice(0, navIdx).replace(/^\s*Fund\s*Amount\s*/i, "").trim();
+    fund = fund.replace(/\s*\n\s*/g, " ").trim();
+
+    const amountMatches = [...chunk.matchAll(/₹([\d,]+(?:\.\d+)?)/g)];
+    if (amountMatches.length === 0) return;
+    const amount = parseAmount_(amountMatches[amountMatches.length - 1][1]);
+
+    if (fund && Number.isFinite(amount) && amount > 0) rows.push({ fund, amount });
+  });
+
+  return rows;
+}
+
+function processZerodhaSipRedemptions() {
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const threads = GmailApp.search(
+    'from:noreply-coin@qmailer.zerodha.net subject:"Coin by Zerodha - Redemption report" -label:' +
+      PROCESSED_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processZerodhaSipRedemptions: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const date = toIsoDate_(message.getDate());
+      const rows = parseZerodhaRedemptions_(body);
+
+      rows.forEach((row, i) => {
+        appendInvoiceRow_(
+          date, "Coin by Zerodha", "ZERODHA-REDEEM-" + message.getId() + "-" + i,
+          row.fund + " (redemption)", "investments", -row.amount, 0
+        );
       });
 
       if (rows.length > 0) {
@@ -1060,6 +1160,7 @@ function runSpendSenseSync() {
     processSalaryCredits,
     processAmazonOrders,
     processZerodhaSipInvestments,
+    processZerodhaSipRedemptions,
     processAxisSavingsUpiTransactions,
     processIgnoredAndFlaggedNoise,
   ];
@@ -1188,6 +1289,7 @@ function debugDumpSampleBodies() {
   const samples = [
     ["Scapia transaction", 'from:scapiacards@federalbank.co.in subject:"Your transaction was successful"'],
     ["Axis My Zone transaction", 'from:alerts@axis.bank.in subject:"spent on credit card no. XX5085"'],
+    ["Zerodha SIP allotment", 'from:noreply-coin@qmailer.zerodha.net subject:"Coin by Zerodha - Allotment report"'],
   ];
 
   let row = 1;

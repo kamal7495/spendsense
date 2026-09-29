@@ -126,9 +126,27 @@ account) so only those retry, without touching the rest of the backlog.
   looks like a bill payment routed through the card (same double-count
   risk), and every Axis savings-account UPI transaction (above).
 - **Coin by Zerodha SIP allotments** → `investments`, itemized per fund from
-  the consolidated monthly allotment-report email (one row per fund bought
-  that cycle). `investments` is deliberately excluded from the This month/
-  Last month spend totals — see the category comment in `lib/types.ts`.
+  the consolidated allotment-report email (one row per fund bought that
+  cycle). `investments` is deliberately excluded from the This month/Last
+  month spend totals — see the category comment in `lib/types.ts`.
+  `parseZerodhaAllotments_` chunks the body on each entry's trailing
+  "<units> units" marker rather than anchoring to a specific line layout —
+  `GmailApp.getPlainBody()` strips the email's markdown table entirely (no
+  "|" survives, unlike the Gmail API's own plain-text rendering of the same
+  message) and reflows each cell onto its own line, with the fund name
+  sometimes landing on the same line as "Folio no.:" and sometimes on its
+  own line depending on name length; the invested amount is also sometimes a
+  whole rupee figure with no decimal point at all (e.g. "₹59997"). All
+  verified against real emails, not guessed — same renderer-mismatch class
+  of bug that broke the Amazon order parser earlier.
+- **Coin by Zerodha SIP redemptions** → also `investments`, as a NEGATIVE
+  amount (item labeled "<fund> (redemption)") — a redemption pulls money OUT
+  of a fund back to the bank account, so it nets against contributions
+  rather than needing a separate category or sheet. Real redemption emails
+  have a different shape than allotments: no "Folio no.:" at all, instead
+  "<fund name> NAV: ₹<nav>", plus a trailing disclaimer row ("Amount will be
+  credited directly to your bank account...") that's naturally excluded
+  since it has no NAV or units marker to chunk on.
 - **Amazon order confirmations** → `shopping`, one row per Order # (not per
   item — see "Amazon orders live in a different account" below for why),
   vendor `Amazon`. Every card processor (ICICI, Axis My Zone, Axis Neo
