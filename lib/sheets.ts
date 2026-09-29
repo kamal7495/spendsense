@@ -46,16 +46,26 @@ function getSheetId(): string {
   return getEnv("GOOGLE_SHEET_ID");
 }
 
+/**
+ * A partner's own, independently-owned SpendSense Sheet (their own Apps
+ * Script pipeline, their own Gmail) - optional. When set, the same service
+ * account must be shared as an Editor on that Sheet too. Returns null (not
+ * an error) when unset, so a single-user setup is unaffected.
+ */
+function getPartnerSheetId(): string | null {
+  return process.env.PARTNER_GOOGLE_SHEET_ID || null;
+}
+
 function toNumber(value: unknown): number {
   const n = typeof value === "number" ? value : parseFloat(String(value ?? ""));
   return Number.isFinite(n) ? n : 0;
 }
 
 /** Reads every data row (excluding the header) from Invoices_Raw. */
-export async function getInvoices(): Promise<InvoiceRow[]> {
+export async function getInvoices(spreadsheetId: string = getSheetId()): Promise<InvoiceRow[]> {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: getSheetId(),
+    spreadsheetId,
     range: `${INVOICES_SHEET}!A2:H`,
   });
 
@@ -105,10 +115,10 @@ export async function appendInvoiceItems(items: InvoiceLineItem[]): Promise<void
 }
 
 /** Reads every data row (excluding the header) from Budgets. */
-export async function getBudgets(): Promise<BudgetRow[]> {
+export async function getBudgets(spreadsheetId: string = getSheetId()): Promise<BudgetRow[]> {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: getSheetId(),
+    spreadsheetId,
     range: `${BUDGETS_SHEET}!A2:B`,
   });
 
@@ -157,10 +167,12 @@ export async function upsertBudget(category: Category, monthlyTarget: number): P
 }
 
 /** Reads every data row (excluding the header) from Account_Balances. */
-export async function getAccountBalances(): Promise<AccountBalanceRow[]> {
+export async function getAccountBalances(
+  spreadsheetId: string = getSheetId()
+): Promise<AccountBalanceRow[]> {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: getSheetId(),
+    spreadsheetId,
     range: `${ACCOUNT_BALANCES_SHEET}!A2:C`,
   });
 
@@ -182,12 +194,12 @@ export async function getAccountBalances(): Promise<AccountBalanceRow[]> {
  * creates it lazily on the first matched salary credit), so the Dashboard
  * doesn't break for a user who hasn't run the updated script yet.
  */
-export async function getIncome(): Promise<IncomeRow[]> {
+export async function getIncome(spreadsheetId: string = getSheetId()): Promise<IncomeRow[]> {
   const sheets = getSheetsClient();
   let rows: string[][];
   try {
     const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: getSheetId(),
+      spreadsheetId,
       range: `${INCOME_SHEET}!A2:D`,
     });
     rows = (res.data.values as string[][]) ?? [];
@@ -243,5 +255,45 @@ export async function upsertAccountBalance(
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [[account, openingBalance, asOfDate]] },
     });
+  }
+}
+
+/**
+ * Combined invoices from your own Sheet and (when PARTNER_GOOGLE_SHEET_ID is
+ * set) a partner's independently-owned Sheet, each row tagged with `owner`
+ * ("you" / "partner") - each person's own Apps Script pipeline keeps writing
+ * to their own Sheet; this only reads and merges for a joint view. Returns
+ * just your own invoices, untagged, when no partner Sheet is configured, so
+ * a single-user setup is completely unaffected. If the partner Sheet read
+ * fails (not shared with the service account yet, wrong ID, tab renamed),
+ * that failure is logged and swallowed rather than breaking the whole
+ * dashboard - your own data still loads.
+ */
+export async function getHouseholdInvoices(): Promise<InvoiceRow[]> {
+  const mine = (await getInvoices()).map((r) => ({ ...r, owner: "you" }));
+  const partnerSheetId = getPartnerSheetId();
+  if (!partnerSheetId) return mine;
+
+  try {
+    const theirs = (await getInvoices(partnerSheetId)).map((r) => ({ ...r, owner: "partner" }));
+    return [...mine, ...theirs];
+  } catch (e) {
+    console.error("getHouseholdInvoices: failed to read partner Sheet", e);
+    return mine;
+  }
+}
+
+/** Combined income from your own Sheet and, when configured, a partner's Sheet. See getHouseholdInvoices. */
+export async function getHouseholdIncome(): Promise<IncomeRow[]> {
+  const mine = (await getIncome()).map((r) => ({ ...r, owner: "you" }));
+  const partnerSheetId = getPartnerSheetId();
+  if (!partnerSheetId) return mine;
+
+  try {
+    const theirs = (await getIncome(partnerSheetId)).map((r) => ({ ...r, owner: "partner" }));
+    return [...mine, ...theirs];
+  } catch (e) {
+    console.error("getHouseholdIncome: failed to read partner Sheet", e);
+    return mine;
   }
 }

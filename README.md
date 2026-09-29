@@ -95,6 +95,35 @@ permanent audit trail; never bulk-cleared.
 
 6. Open http://localhost:3000.
 
+## Linking a partner's data
+
+To combine a partner's spending into a joint view while keeping each
+person's raw data in their own, independently-owned Sheet:
+
+1. **Partner creates their own copy** of the SpendSense Google Sheet (same
+   tab structure — `Invoices_Raw`, `Budgets`, `Account_Balances`,
+   `Income_Raw`), and pastes+runs `apps-script/Code.gs` on it under their
+   own Google account, same as `apps-script/README.md` describes. This
+   grants the script Gmail read/label and Sheets write access **on their
+   account** — make sure they understand what they're approving.
+2. Partner shares their new Sheet with your existing service account email
+   (`GOOGLE_SERVICE_ACCOUNT_EMAIL`) as an Editor — the same service account
+   your own Sheet already uses; no second Google Cloud project needed.
+3. Set `PARTNER_GOOGLE_SHEET_ID` in `.env.local` to their Sheet's ID.
+   `getHouseholdInvoices()` / `getHouseholdIncome()` (`lib/sheets.ts`) then
+   read and merge both Sheets, tagging each row `owner: "you" | "partner"` —
+   nothing is written back to the partner's Sheet from this app.
+
+**What this doesn't solve on its own:** every parser in `apps-script/Code.gs`
+(ICICI/Axis/Scapia formats, Instamart's item layout, etc.) was built and
+verified against *this account's* real emails — a partner using different
+banks/apps will need their own parsers written and verified against *their*
+real sample emails the same way (see `apps-script/README.md`'s "never guess
+a parsing format" discipline). Until that's done, their Sheet will mostly
+stay empty even once linked. The combined-dashboard UI (a "You / Partner /
+Household" view) also isn't built yet — that's the next step once there's
+real data in a partner Sheet to design and verify it against.
+
 ## API
 
 - `GET /api/invoices` — returns all rows from `Invoices_Raw` as JSON.

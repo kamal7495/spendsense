@@ -54,6 +54,12 @@ export interface InvoiceRow {
   amount: number;
   fee: number;
   quantity: number; // units purchased in this line; defaults to 1 when unknown
+  /**
+   * Set only when merging rows from multiple people's Sheets into one
+   * household view (see getHouseholdInvoices in lib/sheets.ts) - undefined
+   * for a single-person setup, so it never needs handling elsewhere.
+   */
+  owner?: string;
 }
 
 export interface InvoiceLineItem {
@@ -85,6 +91,8 @@ export interface IncomeRow {
   source: string;
   description: string;
   amount: number;
+  /** Set only when merging multiple people's Income_Raw into one household view - see InvoiceRow.owner. */
+  owner?: string;
 }
 
 export function isCategory(value: string): value is Category {

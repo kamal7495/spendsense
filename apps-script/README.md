@@ -153,12 +153,23 @@ or extend the script's rules once you see a pattern worth automating.
 ## Budget alerts
 
 `checkBudgetAlerts()` runs automatically at the end of every sync. Once a
-category's spend this month reaches 90% of its `Budgets`-tab target, it
-emails you (the account the script is authorized under) — once per
-category per month, tracked in a `Budget_Alerts_Sent` tab so it doesn't
+category's spend this **pay cycle** reaches 90% of its `Budgets`-tab target,
+it emails you (the account the script is authorized under) — once per
+category per cycle, tracked in a `Budget_Alerts_Sent` tab so it doesn't
 repeat daily. This needs the Gmail *send* scope, which is a new permission
 beyond the read/label/sheets access from initial setup — the first run
 after adding this will prompt you to re-authorize.
+
+"Pay cycle" means the 25th of one month through the 24th of the next
+(`PAY_CYCLE_START_DAY` in Code.gs) — confirmed by the user to match their
+actual salary date, so it's when a paycheck really has to stretch across,
+not the calendar month. This matches the Budget page's pacing on the
+Next.js side (`lib/payPeriod.ts`) — keep both in sync if this ever changes.
+One-time note: the dedup key format changed from `category|yyyy-MM` to
+`category|yyyy-MM-dd` (the cycle's start date) when this switched, so an
+alert already sent this calendar month under the old key won't be
+recognized as sent under the new one — worst case, one duplicate email
+around the transition.
 
 ## Extending it
 

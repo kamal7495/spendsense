@@ -1,6 +1,7 @@
 import { getBudgets, getInvoices } from "@/lib/sheets";
-import { spendByCategoryForMonth } from "@/lib/analytics";
+import { spendByCategoryForPeriod } from "@/lib/analytics";
 import { categoryPacing } from "@/lib/pacing";
+import { getCurrentPayPeriod } from "@/lib/payPeriod";
 import { CATEGORIES } from "@/lib/types";
 import BudgetTable, { BudgetRowView } from "@/components/BudgetTable";
 import { CATEGORY_LABEL } from "@/lib/labels";
@@ -14,7 +15,8 @@ export default async function BudgetPage() {
   try {
     const [budgets, invoices] = await Promise.all([getBudgets(), getInvoices()]);
     const now = new Date();
-    const actuals = spendByCategoryForMonth(invoices, now.getFullYear(), now.getMonth());
+    const period = getCurrentPayPeriod(now);
+    const actuals = spendByCategoryForPeriod(invoices, period.startIso, period.endIso);
     const pacing = categoryPacing(invoices, budgets, now);
 
     rows = CATEGORIES.map((category) => ({
@@ -41,17 +43,19 @@ export default async function BudgetPage() {
     );
   }
 
-  const now = new Date();
-  const daysElapsed = now.getDate();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  const pctElapsed = Math.round((daysElapsed / daysInMonth) * 100);
+  const period = getCurrentPayPeriod();
+  const { daysElapsed, daysInPeriod } = period;
+  const pctElapsed = Math.round((daysElapsed / daysInPeriod) * 100);
+  const rangeLabel = period.start.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  const rangeEndLabel = period.end.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
 
   return (
     <div className="flex flex-col gap-4">
       <div>
         <h1 className="text-lg font-semibold">Budgets</h1>
         <p className="text-sm text-gray-500">
-          Day {daysElapsed} of {daysInMonth} — {pctElapsed}% of month elapsed
+          Pay cycle {rangeLabel} – {rangeEndLabel} · Day {daysElapsed} of {daysInPeriod} —{" "}
+          {pctElapsed}% elapsed
         </p>
       </div>
       <div className="rounded-lg border border-gray-200 bg-white p-4">

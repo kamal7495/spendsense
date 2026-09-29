@@ -1281,6 +1281,23 @@ function getOrCreateAlertsSentSheet_() {
  * once manually after pasting this in to accept the new authorization
  * prompt (Apps Script asks again whenever a script requests a new scope).
  */
+// Matches PAY_CYCLE_START_DAY / SALARY_DAY on the Next.js side
+// (lib/payPeriod.ts, lib/cashflow.ts) — confirmed by the user: salary lands
+// on the 25th, so the "budget month" a paycheck actually has to stretch
+// across runs 25th-to-24th, not the calendar month. Keep both in sync if
+// this ever changes.
+const PAY_CYCLE_START_DAY = 25;
+
+function getCurrentPayCycleBounds_(now) {
+  const y = now.getFullYear();
+  const m = now.getMonth();
+  const d = now.getDate();
+  const startMonth = d >= PAY_CYCLE_START_DAY ? m : m - 1;
+  const start = new Date(y, startMonth, PAY_CYCLE_START_DAY);
+  const end = new Date(y, startMonth + 1, PAY_CYCLE_START_DAY - 1, 23, 59, 59, 999);
+  return { start, end };
+}
+
 function checkBudgetAlerts() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const budgetsSheet = ss.getSheetByName(BUDGETS_SHEET);
@@ -1301,7 +1318,8 @@ function checkBudgetAlerts() {
   }
 
   const now = new Date();
-  const monthKey = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM");
+  const { start: cycleStart, end: cycleEnd } = getCurrentPayCycleBounds_(now);
+  const cycleKey = Utilities.formatDate(cycleStart, Session.getScriptTimeZone(), "yyyy-MM-dd");
   const invoiceRows = invoicesSheet.getDataRange().getValues().slice(1);
 
   const spendByCategory = new Map();
@@ -1309,15 +1327,14 @@ function checkBudgetAlerts() {
     const [dateStr, , , , category, amount, fee] = row;
     const d = new Date(dateStr);
     if (Number.isNaN(d.getTime())) return;
-    const rowMonthKey = Utilities.formatDate(d, Session.getScriptTimeZone(), "yyyy-MM");
-    if (rowMonthKey !== monthKey) return;
+    if (d < cycleStart || d > cycleEnd) return;
     const total = (Number(amount) || 0) + (Number(fee) || 0);
     spendByCategory.set(category, (spendByCategory.get(category) || 0) + total);
   });
 
   const alertsSheet = getOrCreateAlertsSentSheet_();
   const alreadySent = new Set(
-    alertsSheet.getDataRange().getValues().slice(1).map(([category, month]) => `${category}|${month}`)
+    alertsSheet.getDataRange().getValues().slice(1).map(([category, cycle]) => `${category}|${cycle}`)
   );
 
   const recipient = Session.getActiveUser().getEmail();
@@ -1326,23 +1343,23 @@ function checkBudgetAlerts() {
   targets.forEach((target, category) => {
     const spend = spendByCategory.get(category) || 0;
     const pct = spend / target;
-    const key = `${category}|${monthKey}`;
+    const key = `${category}|${cycleKey}`;
     if (pct < BUDGET_ALERT_THRESHOLD || alreadySent.has(key)) return;
 
     const label = formatCategoryLabel_(category);
     const subject = `SpendSense: ${label} at ${Math.round(pct * 100)}% of budget`;
     const body =
-      `Your "${label}" spend this month is ${inr_.format(spend)}, ` +
-      `which is ${Math.round(pct * 100)}% of your ${inr_.format(target)} monthly target.\n\n` +
+      `Your "${label}" spend this pay cycle (since ${cycleKey}) is ${inr_.format(spend)}, ` +
+      `which is ${Math.round(pct * 100)}% of your ${inr_.format(target)} target.\n\n` +
       `Check the budget page for details.`;
 
     MailApp.sendEmail(recipient, subject, body);
-    alertsSheet.appendRow([category, monthKey, new Date()]);
+    alertsSheet.appendRow([category, cycleKey, new Date()]);
     alreadySent.add(key);
     sentCount++;
   });
 
-  Logger.log("checkBudgetAlerts: sent %s alert(s) for %s", sentCount, monthKey);
+  Logger.log("checkBudgetAlerts: sent %s alert(s) for cycle starting %s", sentCount, cycleKey);
 }
 
 function createDailyTrigger() {

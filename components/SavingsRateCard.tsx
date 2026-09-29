@@ -18,7 +18,7 @@ export default function SavingsRateCard({ months }: Props) {
 
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <p className="text-sm text-gray-500">Savings rate (3-mo trend)</p>
+      <p className="text-sm text-gray-500">Savings rate (3 pay cycles)</p>
 
       {!hasAnyIncome ? (
         <p className="mt-2 text-sm text-gray-400">
@@ -45,7 +45,7 @@ export default function SavingsRateCard({ months }: Props) {
                       }
                     />
                   </div>
-                  <span className="text-[11px] text-gray-400">{m.label.split(" ")[0]}</span>
+                  <span className="text-[11px] text-gray-400">{m.shortLabel}</span>
                 </div>
               );
             })}

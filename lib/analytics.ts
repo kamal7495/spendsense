@@ -1,4 +1,5 @@
 import { AccountBalanceRow, Category, IncomeRow, InvoiceRow } from "./types";
+import { PayPeriod, getCurrentPayPeriod, previousPayPeriod } from "./payPeriod";
 
 export type Cadence = "monthly bulk" | "weekly" | "perishable" | "occasional";
 
@@ -107,17 +108,33 @@ export function spendByCategory(rows: InvoiceRow[]): CategorySpend[] {
     .sort((a, b) => b.total - a.total);
 }
 
-/** Spend by category restricted to rows dated within the given month/year. */
-export function spendByCategoryForMonth(
+/**
+ * Total spend (amount + fee) for rows dated within [startIso, endIso]
+ * inclusive - the pay-period equivalent of totalSpendForMonth, used by
+ * Budget pacing and Savings rate (both about money available vs. spent, not
+ * calendar-month bookkeeping). Excludes "investments" for the same reason
+ * as totalSpendForMonth. Takes plain "YYYY-MM-DD" strings rather than Date
+ * objects - row.date compares safely as a string; comparing it as a Date
+ * against a separately-constructed boundary Date risks an off-by-one at the
+ * boundary from mismatched UTC-parsed vs. local-constructed representations
+ * (see PayPeriod.startIso/endIso in lib/payPeriod.ts).
+ */
+export function totalSpendForPeriod(rows: InvoiceRow[], startIso: string, endIso: string): number {
+  return rows.reduce((sum, row) => {
+    if (row.category === "investments") return sum;
+    if (row.date < startIso || row.date > endIso) return sum;
+    return sum + lineTotal(row);
+  }, 0);
+}
+
+/** Spend by category restricted to rows dated within [startIso, endIso] inclusive. */
+export function spendByCategoryForPeriod(
   rows: InvoiceRow[],
-  year: number,
-  month: number
+  startIso: string,
+  endIso: string
 ): CategorySpend[] {
-  const inMonth = rows.filter((row) => {
-    const d = parseDate(row.date);
-    return d && d.getFullYear() === year && d.getMonth() === month;
-  });
-  return spendByCategory(inMonth);
+  const inPeriod = rows.filter((row) => row.date >= startIso && row.date <= endIso);
+  return spendByCategory(inPeriod);
 }
 
 export interface FrequentItem {
@@ -666,50 +683,56 @@ export function itemPurchaseSummary(
 }
 
 export interface MonthlySavingsRate {
-  year: number;
-  month: number;
-  label: string; // e.g. "Jul 2026"
+  year: number; // pay period's start year
+  month: number; // pay period's start month (0-indexed)
+  label: string; // e.g. "25 Aug – 24 Sep"
+  shortLabel: string; // e.g. "25 Aug" - compact tick label for charts
   income: number;
   expense: number;
-  /** (income - expense) / income. Null when there's no income recorded for the month yet. */
+  /** (income - expense) / income. Null when there's no income recorded for the period yet. */
   savingsRate: number | null;
 }
 
+function formatShortDate(d: Date): string {
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+
 /**
- * Trailing N-month (default 3) income vs. expense, and the resulting savings
- * rate for each month. Expense reuses totalSpendForMonth, which already
- * excludes "investments" - a SIP contribution is itself saved money, not
- * consumption, so it shouldn't count against the savings rate twice.
+ * Trailing N pay-period (default 3) income vs. expense, and the resulting
+ * savings rate for each - a pay period runs SALARY_DAY through SALARY_DAY-1
+ * of the next month (see lib/payPeriod.ts), matching when a paycheck
+ * actually has to stretch across, rather than the calendar month. Expense
+ * reuses totalSpendForPeriod, which already excludes "investments" - a SIP
+ * contribution is itself saved money, not consumption, so it shouldn't
+ * count against the savings rate twice.
  */
 export function savingsRateTrend(
   invoices: InvoiceRow[],
   income: IncomeRow[],
-  monthsBack = 3,
+  periodsBack = 3,
   now: Date = new Date()
 ): MonthlySavingsRate[] {
-  const months: MonthlySavingsRate[] = [];
+  const periods: PayPeriod[] = [getCurrentPayPeriod(now)];
+  for (let i = 1; i < periodsBack; i++) {
+    periods.push(previousPayPeriod(periods[periods.length - 1]));
+  }
+  periods.reverse(); // oldest first
 
-  for (let i = monthsBack - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    const year = d.getFullYear();
-    const month = d.getMonth();
-
-    const expense = totalSpendForMonth(invoices, year, month);
+  return periods.map((p) => {
+    const expense = totalSpendForPeriod(invoices, p.startIso, p.endIso);
     const incomeTotal = income.reduce((sum, row) => {
-      const rd = parseDate(row.date);
-      if (!rd || rd.getFullYear() !== year || rd.getMonth() !== month) return sum;
+      if (row.date < p.startIso || row.date > p.endIso) return sum;
       return sum + row.amount;
     }, 0);
 
-    months.push({
-      year,
-      month,
-      label: d.toLocaleString("en-US", { month: "short", year: "numeric" }),
+    return {
+      year: p.start.getFullYear(),
+      month: p.start.getMonth(),
+      label: `${formatShortDate(p.start)} – ${formatShortDate(p.end)}`,
+      shortLabel: formatShortDate(p.start),
       income: incomeTotal,
       expense,
       savingsRate: incomeTotal > 0 ? (incomeTotal - expense) / incomeTotal : null,
-    });
-  }
-
-  return months;
+    };
+  });
 }
