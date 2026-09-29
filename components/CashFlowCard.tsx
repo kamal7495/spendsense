@@ -24,7 +24,41 @@ const EVENT_COLOR: Record<CashFlowEvent["type"], string> = {
   payment_due: "#d03b3b",
 };
 
+interface CardGroup {
+  key: string;
+  label: string;
+  statementClose?: CashFlowEvent;
+  paymentDue?: CashFlowEvent;
+  sortDaysAway: number;
+}
+
+// statement_close and payment_due are two dates for the SAME physical card
+// - grouped into one row so a card doesn't visually read as two different
+// cards just because it has two upcoming dates.
+function groupByCard(events: CashFlowEvent[]): { salary: CashFlowEvent | null; cards: CardGroup[] } {
+  let salary: CashFlowEvent | null = null;
+  const groups = new Map<string, CardGroup>();
+
+  for (const e of events) {
+    if (e.type === "salary") {
+      salary = e;
+      continue;
+    }
+    const cardLabel = e.type === "payment_due" ? e.label.replace(/ payment due$/, "") : e.label;
+    const existing = groups.get(cardLabel);
+    const group: CardGroup = existing ?? { key: cardLabel, label: cardLabel, sortDaysAway: e.daysAway };
+    if (e.type === "statement_close") group.statementClose = e;
+    else group.paymentDue = e;
+    group.sortDaysAway = Math.min(group.sortDaysAway, e.daysAway);
+    groups.set(cardLabel, group);
+  }
+
+  return { salary, cards: Array.from(groups.values()).sort((a, b) => a.sortDaysAway - b.sortDaysAway) };
+}
+
 export default function CashFlowCard({ events }: Props) {
+  const { salary, cards } = groupByCard(events);
+
   return (
     <section className="rounded-lg border border-gray-200 bg-white p-4">
       <h2 className="text-base font-semibold">Cash flow</h2>
@@ -58,31 +92,54 @@ export default function CashFlowCard({ events }: Props) {
       </div>
 
       <div className="mt-5 flex flex-col gap-3">
-        {events.map((e) => (
-          <div key={e.label} className="flex items-center justify-between gap-3 border-t border-gray-100 pt-3 first:border-0 first:pt-0">
+        {salary && (
+          <div className="flex items-center justify-between gap-3 border-t border-gray-100 pt-3 first:border-0 first:pt-0">
             <div className="flex items-center gap-2.5">
-              <span
-                className="h-2.5 w-2.5 shrink-0 rounded-full"
-                style={{ backgroundColor: EVENT_COLOR[e.type] }}
-              />
+              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: EVENT_COLOR.salary }} />
               <div>
-                <p className="text-sm font-medium text-gray-900">{e.label}</p>
+                <p className="text-sm font-medium text-gray-900">{salary.label}</p>
                 <p className="text-xs text-gray-500">
-                  {formatDay(e.nextDate)} &middot; {awayLabel(e.daysAway)}
-                  {e.cycleStart && ` · spend since ${formatDay(e.cycleStart)}`}
-                  {e.type === "payment_due" && !e.amountIsFinal && " · still accumulating"}
+                  {formatDay(salary.nextDate)} &middot; {awayLabel(salary.daysAway)}
                 </p>
               </div>
             </div>
             <span className="whitespace-nowrap text-sm font-medium tabular-nums text-gray-900">
-              {e.type === "salary"
-                ? SALARY_TYPICAL_AMOUNT
-                : e.type === "payment_due" && !e.amountIsFinal
-                  ? `≈ ${currency.format(e.amount ?? 0)}`
-                  : currency.format(e.amount ?? 0)}
+              {SALARY_TYPICAL_AMOUNT}
             </span>
           </div>
-        ))}
+        )}
+
+        {cards.map((c) => {
+          const due = c.paymentDue;
+          const close = c.statementClose;
+          return (
+            <div key={c.key} className="flex items-center justify-between gap-3 border-t border-gray-100 pt-3 first:border-0 first:pt-0">
+              <div className="flex items-center gap-2.5">
+                <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: EVENT_COLOR.payment_due }} />
+                <div>
+                  <p className="text-sm font-medium text-gray-900">{c.label}</p>
+                  <p className="text-xs text-gray-500">
+                    {due && (
+                      <>
+                        Due {formatDay(due.nextDate)} &middot; {awayLabel(due.daysAway)}
+                        {!due.amountIsFinal && " · still accumulating"}
+                      </>
+                    )}
+                    {due && close && " · "}
+                    {close && `Cycle closes ${formatDay(close.nextDate)}`}
+                  </p>
+                </div>
+              </div>
+              <span className="whitespace-nowrap text-sm font-medium tabular-nums text-gray-900">
+                {due
+                  ? due.amountIsFinal
+                    ? currency.format(due.amount ?? 0)
+                    : `≈ ${currency.format(due.amount ?? 0)}`
+                  : currency.format(close?.amount ?? 0)}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
