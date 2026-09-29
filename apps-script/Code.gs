@@ -18,14 +18,17 @@
  */
 
 const INVOICES_SHEET = "Invoices_Raw";
+const INCOME_SHEET = "Income_Raw";
 const NEEDS_REVIEW_SHEET = "Needs_Review";
 const PROCESSED_LABEL = "SpendSense/Processed";
 const IGNORED_LABEL = "SpendSense/Ignored";
 const NEEDS_REVIEW_LABEL = "SpendSense/NeedsReview";
 
-// Only look at mail from the last 6 months — this app tracks recent spend,
-// not a full financial history. Change the "6m" to widen/narrow the window.
-const DATE_FILTER = "newer_than:6m";
+// Fixed start date rather than a rolling window, per the user: hold data
+// from 1 Jan 2026 onward only, indefinitely — not "the last N months",
+// which would silently roll old months off as time passes. Gmail's
+// after:YYYY/MM/DD syntax is inclusive of that date.
+const DATE_FILTER = "after:2026/01/01";
 
 // Apps Script hard-caps a single execution at 6 minutes. There's ~2 years of
 // mail to backfill, so each run only takes a bounded slice per source —
@@ -108,6 +111,16 @@ function getOrCreateNeedsReviewSheet_() {
   return sheet;
 }
 
+function getOrCreateIncomeSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(INCOME_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(INCOME_SHEET);
+    sheet.appendRow(["Date", "Source", "Description", "Amount"]);
+  }
+  return sheet;
+}
+
 // Sheets sometimes auto-converts a "YYYY-MM-DD" string into an actual date
 // serial number on append (observed inconsistently during rapid consecutive
 // appends), which then reads back as a bare number like "46235" instead of
@@ -127,6 +140,12 @@ function appendNeedsReview_(date, vendor, description, amount, message, reason) 
   const link = "https://mail.google.com/mail/u/0/#inbox/" + message.getId();
   const sheet = getOrCreateNeedsReviewSheet_();
   sheet.appendRow([date, vendor, description, amount, link, reason]);
+  forceTextCell_(sheet, sheet.getLastRow(), 1, date);
+}
+
+function appendIncomeRow_(date, source, description, amount) {
+  const sheet = getOrCreateIncomeSheet_();
+  sheet.appendRow([date, source, description, amount]);
   forceTextCell_(sheet, sheet.getLastRow(), 1, date);
 }
 
@@ -263,13 +282,19 @@ function processSwiggyDiningOrders() {
 
 const CARD_MERCHANT_CATEGORY_RULES = [
   ["subscriptions", ["anthropic", "netflix", "spotify", "prime video", "youtube premium"]],
-  ["shopping", ["amazon", "asspl", "flipkart", "myntra", "blink comme", "blinkit"]],
+  ["shopping", ["amazon", "asspl", "flipkart", "myntra", "blink comme", "blinkit", "zudio"]],
   ["transport", ["rapido", "uber", "ola cabs", "olacabs", "metro", "bmrcl", "cmrl",
     "redbus", "irctc"]],
   ["utilities", ["tnpdcl", "electricity", "bescom", "water board", "gas",
     "broadband", "airtel", "jio", "vodafone", "vi recharge"]],
   ["dining_out", ["starbucks"]],
   ["travel", ["makemytrip", "make my trip", "goibibo", "yatra"]],
+  ["health", ["apollo pharm"]],
+  ["entertainment", ["bookmyshow"]],
+  ["personal_care", ["aadhvik", "vurve corp"]],
+  // Car service/maintenance, not a ride fare — kept out of "transport" so it
+  // doesn't blend with Rapido/Uber/metro-style commute costs.
+  ["other", ["volkswagen"]],
 ];
 
 // Merchant names that are ALREADY captured via their own dedicated source
@@ -285,6 +310,19 @@ function isAlreadyCapturedElsewhere_(merchant) {
   return ALREADY_CAPTURED_MERCHANT_KEYWORDS.some((k) => lower.includes(k));
 }
 
+// Amazon orders are itemized via processAmazonOrders, but that runs under a
+// DIFFERENT Google account (confirmed by the user) whose sync may not be set
+// up yet — unlike the Swiggy/Instamart case above, this isn't flagged as a
+// certain duplicate to skip silently, since doing so could silently drop
+// real spend if that other account's sync isn't running. Routed to
+// Needs_Review instead, so nothing goes unrecorded either way.
+const AMAZON_MERCHANT_KEYWORDS = ["amazon", "asspl"];
+
+function isPossibleAmazonDuplicate_(merchant) {
+  const lower = merchant.toLowerCase();
+  return AMAZON_MERCHANT_KEYWORDS.some((k) => lower.includes(k));
+}
+
 function categorizeCardMerchant_(merchant) {
   const lower = merchant.toLowerCase();
   for (const [category, keywords] of CARD_MERCHANT_CATEGORY_RULES) {
@@ -292,6 +330,17 @@ function categorizeCardMerchant_(merchant) {
   }
   return null; // unrecognized merchant -> Needs_Review, not a guess
 }
+
+// JioFiber is billed to this card and already itemized by
+// processJioFiberBills (reading Jio's own confirmation email) — recording it
+// again here would double-count. Confirmed by the user: the ₹1,178.82 charge
+// shows up under several different Reliance-family merchant strings
+// (RELIANCE JIO INFOCOMM, MYJIO, RELIANCEJIO, and even the generic
+// "RELIANCE RETAIL LIMITE", which doesn't contain "jio" as text at all) —
+// so this is matched by the exact amount rather than broadening the merchant
+// keyword, since "Reliance Retail" alone is far too generic a string to
+// safely match (it's also used for unrelated Reliance Retail purchases).
+const JIOFIBER_CARD_CHARGE_AMOUNT = 1178.82;
 
 function processIciciCardAlerts() {
   const processed = getOrCreateLabel_(PROCESSED_LABEL);
@@ -320,6 +369,18 @@ function processIciciCardAlerts() {
       const amount = parseAmount_(amountDateMatch[1]);
       const merchant = merchantMatch[1].trim();
       const date = toIsoDate_(new Date(amountDateMatch[2]));
+
+      if (amount === JIOFIBER_CARD_CHARGE_AMOUNT) {
+        message.getThread().addLabel(processed); // known duplicate of processJioFiberBills — skip silently
+        return;
+      }
+      if (isPossibleAmazonDuplicate_(merchant)) {
+        appendNeedsReview_(date, "ICICI Bank Credit Card", merchant, amount, message,
+          "Possible duplicate of an itemized Amazon order captured via the other account — confirm once that sync is set up");
+        message.getThread().addLabel(needsReview);
+        return;
+      }
+
       const category = categorizeCardMerchant_(merchant);
 
       if (category) {
@@ -368,12 +429,26 @@ function processAxisUpiBillPayments() {
   });
 }
 
-// --- Source 5: known recurring debits (insurance, etc.) ---------------------
+// --- Source 5: known recurring debits (insurance, home loan EMI, etc.) ------
+
+// Each entry's item/category is a confirmed real-world label (not a guess),
+// matched against the ACH narration text in the alert body. A narration that
+// doesn't match any of these still falls through to
+// processIgnoredAndFlaggedNoise's generic review-flagging.
+const KNOWN_RECURRING_DEBITS = [
+  { keyword: "ACH-DR-HDFCLifeInsuranceCo", item: "Life insurance premium (HDFC Life)", category: "other" },
+  // Confirmed by the user: recurring ~₹66,864/month via "ACH-DR-HDFC BANK
+  // LTD-<serial>" (the serial changes every month, so only the fixed prefix
+  // is searched/matched).
+  { keyword: "ACH-DR-HDFC BANK LTD", item: "Home loan EMI (HDFC Bank)", category: "other" },
+];
 
 function processAxisRecurringDebits() {
   const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const subjectQuery = KNOWN_RECURRING_DEBITS.map((d) => `"${d.keyword}"`).join(" OR ");
   const threads = GmailApp.search(
-    'from:alerts@axis.bank.in subject:"Debit transaction alert" "ACH-DR-HDFCLifeInsuranceCo" -label:' + PROCESSED_LABEL + ' ' + DATE_FILTER,
+    `from:alerts@axis.bank.in subject:"Debit transaction alert" (${subjectQuery}) -label:` +
+      PROCESSED_LABEL + ' ' + DATE_FILTER,
     0, MAX_THREADS_PER_SOURCE
   );
   Logger.log("processAxisRecurringDebits: %s matching threads", threads.length);
@@ -384,10 +459,13 @@ function processAxisRecurringDebits() {
       const match = body.match(/debited with INR ([\d,.]+) on (\d{2}-\d{2}-\d{2,4})/);
       if (!match) return;
 
+      const known = KNOWN_RECURRING_DEBITS.find((d) => body.includes(d.keyword));
+      if (!known) return; // shouldn't happen given the search query, but stay safe
+
       const amount = parseAmount_(match[1]);
       const date = normalizeAxisDate_(match[2]);
 
-      appendInvoiceRow_(date, "Axis Bank", "AXIS-ACH-" + message.getId(), "Life insurance premium (HDFC Life)", "other", amount, 0);
+      appendInvoiceRow_(date, "Axis Bank", "AXIS-ACH-" + message.getId(), known.item, known.category, amount, 0);
       message.getThread().addLabel(processed);
     });
   });
@@ -502,6 +580,12 @@ function processAxisMyZoneTransactions() {
         message.getThread().addLabel(processed); // known duplicate — skip silently, no row
         return;
       }
+      if (isPossibleAmazonDuplicate_(merchant)) {
+        appendNeedsReview_(date, "Axis My Zone (XX85)", merchant, amount, message,
+          "Possible duplicate of an itemized Amazon order captured via the other account — confirm once that sync is set up");
+        message.getThread().addLabel(needsReview);
+        return;
+      }
       if (/bill\s*p/i.test(merchant)) {
         appendNeedsReview_(date, "Axis My Zone (XX85)", merchant, amount, message,
           "Possible duplicate of a bill already recorded via a UPI payment alert — confirm before adding");
@@ -559,6 +643,12 @@ function processAxisNeoRupayTransactions() {
         message.getThread().addLabel(processed);
         return;
       }
+      if (isPossibleAmazonDuplicate_(merchant)) {
+        appendNeedsReview_(date, "Axis Neo Rupay (XX82)", merchant, amount, message,
+          "Possible duplicate of an itemized Amazon order captured via the other account — confirm once that sync is set up");
+        message.getThread().addLabel(needsReview);
+        return;
+      }
       if (/bill\s*p/i.test(merchant)) {
         appendNeedsReview_(date, "Axis Neo Rupay (XX82)", merchant, amount, message,
           "Possible duplicate of a bill already recorded via a UPI payment alert — confirm before adding");
@@ -602,6 +692,14 @@ function processScapiaTransactions() {
       const amount = parseAmount_(amountMatch[1]);
       const merchant = merchantMatch[1].trim();
       const date = toIsoDate_(message.getDate());
+
+      if (isPossibleAmazonDuplicate_(merchant)) {
+        appendNeedsReview_(date, "Federal Bank (Scapia Card)", merchant, amount, message,
+          "Possible duplicate of an itemized Amazon order captured via the other account — confirm once that sync is set up");
+        message.getThread().addLabel(needsReview);
+        return;
+      }
+
       const category = categorizeCardMerchant_(merchant);
 
       if (category) {
@@ -615,14 +713,279 @@ function processScapiaTransactions() {
   });
 }
 
+// --- Source 11: Jio Fiber broadband recharges (utilities) -------------------
+
+// Direct recharge-confirmation email from Jio itself, like RedBus/IRCTC —
+// not a bank alert. The same amount also shows up as a generic "INR X was
+// debited from your A/c" UPI alert, a format this pipeline doesn't parse at
+// all yet (confirmed against real data: a ₹1,178.82 JioFiber recharge and a
+// same-day, same-amount UPI debit alert both exist for 10-Aug-2026). If a
+// future source starts parsing that generic UPI-debit format, it MUST skip
+// merchants matching "jio"/"jiofiber" to avoid double-counting this one.
+function processJioFiberBills() {
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const threads = GmailApp.search(
+    'from:notifications_jiofiber@jio.com subject:"Recharge successful for JioFiber connection" -label:' +
+      PROCESSED_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processJioFiberBills: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const amountMatch = body.match(/Recharge of Rs\.([\d,.]+) is successful/i);
+      const txnMatch = body.match(/Transaction ID\s*:\s*([A-Za-z0-9]+)/i);
+      if (!amountMatch) return;
+
+      const amount = parseAmount_(amountMatch[1]);
+      const orderId = txnMatch ? txnMatch[1] : message.getId();
+      const date = toIsoDate_(message.getDate());
+
+      appendInvoiceRow_(date, "Jio", "JIO-" + orderId, "JioFiber recharge", "utilities", amount, 0);
+      message.getThread().addLabel(processed);
+    });
+  });
+}
+
+// --- Source 12: Axis savings account UPI transactions (unrecognized) --------
+
+// A distinct alert format from the "Debit transaction alert for Axis Bank
+// A/c" template used elsewhere in this file: subject "INR X was debited from
+// your A/c no. XX3447.", body fields "Amount Debited:" / "Transaction Info:".
+// Confirmed real gap: UPI/P2M (merchant) and UPI/P2A (person-to-person)
+// purchases straight from the savings account weren't captured by any
+// source at all — cross-checked against a real cashbook export, this
+// accounted for real spend (daily food, fuel) with zero visibility here.
+//
+// Deliberately does NOT try to auto-categorize: confirmed against real data
+// that the "merchant" in UPI/P2M often renders as a personal name (e.g.
+// "SHOJAN K R" for what was actually a restaurant bill), not a business
+// name — there's no reliable keyword to categorize by, so guessing here
+// would mean guessing wrong often. Every transaction goes to Needs_Review
+// instead, split into P2A/P2M/other so the reason at least says which.
+function processAxisSavingsUpiTransactions() {
+  const needsReview = getOrCreateLabel_(NEEDS_REVIEW_LABEL);
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const threads = GmailApp.search(
+    'from:alerts@axis.bank.in subject:"was debited from your A/c" -label:' + PROCESSED_LABEL +
+      ' -label:' + NEEDS_REVIEW_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processAxisSavingsUpiTransactions: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const amountMatch = body.match(/Amount Debited:\s*\n*\s*INR\s*([\d,.]+)/i);
+      const infoMatch = body.match(/Transaction Info:\s*\n*\s*(UPI\/[^\n]+)/i);
+      if (!amountMatch || !infoMatch) return;
+
+      const amount = parseAmount_(amountMatch[1]);
+      const info = infoMatch[1].trim();
+      const date = toIsoDate_(message.getDate());
+
+      // Already captured via processJioFiberBills (Jio's own confirmation
+      // email) — this UPI debit is the same recharge, seen from the bank
+      // side instead. Recording it here too would double-count.
+      if (amount === JIOFIBER_CARD_CHARGE_AMOUNT) {
+        message.getThread().addLabel(processed);
+        return;
+      }
+
+      const reason = /^UPI\/P2A\//i.test(info)
+        ? "UPI person-to-person transfer — confirm purpose before categorizing"
+        : /^UPI\/P2M\//i.test(info)
+          ? "UPI merchant payment — pick a category (payee names here are often personal, not business, names)"
+          : "Unrecognized UPI transaction type — pick a category";
+
+      appendNeedsReview_(date, "Axis Bank", info, amount, message, reason);
+      message.getThread().addLabel(needsReview);
+    });
+  });
+}
+
+// --- Source 13: Salary credits (income) --------------------------------------
+
+// Axis sends a "Credit transaction alert" for EVERY credit to the savings
+// account (small P2P transfers, refunds, interest, salary — all the same
+// subject line). Verified against real emails that the monthly salary
+// credit is a NEFT whose narration ends in "/Sala" (the narration field
+// truncates "Salary" mid-word: e.g. "NEFT/IN22626825782262/Sala."). Only
+// that pattern is recorded as income; every other credit on this subject
+// is out of scope for this source (not income — a P2P transfer or refund)
+// and is marked processed so it isn't rescanned indefinitely.
+function processSalaryCredits() {
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const threads = GmailApp.search(
+    'from:alerts@axis.bank.in subject:"Credit transaction alert for Axis Bank A/c" -label:' +
+      PROCESSED_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processSalaryCredits: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const match = body.match(/credited with INR\s*([\d,.]+)\s*on\s*(\d{2}-\d{2}-\d{2,4})[^\n]*?by\s+([^\n.]+)\./);
+      if (!match) return;
+
+      const narration = match[3].trim();
+      if (!/\/Sala$/i.test(narration)) {
+        // Not a salary credit (P2P transfer, refund, interest, etc.) — out of
+        // scope for income tracking, and not spend either, so nothing to log.
+        message.getThread().addLabel(processed);
+        return;
+      }
+
+      const amount = parseAmount_(match[1]);
+      const date = normalizeAxisDate_(match[2]);
+      appendIncomeRow_(date, "Salary (Axis Bank)", narration, amount);
+      message.getThread().addLabel(processed);
+    });
+  });
+}
+
+// --- Source 15: Amazon order confirmations (shopping) -----------------------
+
+// Lives in a different Google account than the one this script is usually
+// run from (confirmed by the user) — harmless to include in the shared
+// source list regardless of which account runs it, since the search simply
+// finds nothing in an account that never receives these.
+//
+// Each "Ordered:" email is a DIGEST that can bundle multiple distinct Amazon
+// orders (different Order #s, one per shipment/seller) together. Per-item
+// prices in the plain-text rendering are unreliable — they render with no
+// decimal point and don't sum to the order's own total (a real observed
+// case: item prices 68900/99800/41900/18900 for an order whose actual Total
+// was ₹2,607.35 — no consistent scale reconciles them). Only the per-order
+// "Total ₹X" line is trustworthy, so this records ONE row per Order # (not
+// per item), joining the item names together for visibility into what was
+// actually bought without guessing at a per-item price split.
+function processAmazonOrders() {
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const needsReview = getOrCreateLabel_(NEEDS_REVIEW_LABEL);
+  const threads = GmailApp.search(
+    'from:auto-confirm@amazon.in subject:"Ordered:" -label:' + PROCESSED_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processAmazonOrders: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const date = toIsoDate_(message.getDate());
+      const segments = body.split(/Order #/).slice(1); // first chunk is preamble before any order
+      if (segments.length === 0) return; // not an order-confirmation shaped email; retry next run
+
+      let wroteSomething = false;
+      segments.forEach((seg) => {
+        // Real template (verified against 5 actual emails via
+        // debugDumpAmazonFailures — a FORWARDED sample looked different, with
+        // "[image: ...]" markup and "Total ₹X" on one line, but that turned
+        // out to be a rendering artifact of forwarding itself, not what
+        // getPlainBody() ever actually returns): order number on its own
+        // line after "Order #", each item as "* <name>\n  Quantity: N\n
+        // NNN INR", and "Total\nNNN INR" with the label and amount on
+        // separate lines, no ₹ symbol.
+        const orderIdMatch = seg.match(/^\s*(\d{3}-\d{7}-\d{7})/);
+        const totalMatch = seg.match(/Total\s*\n\s*([\d,.]+)\s*INR/);
+        if (!orderIdMatch || !totalMatch) {
+          appendNeedsReview_(
+            date, "Amazon", "Order segment didn't match parser format", "", message,
+            "Different email template — parser couldn't find an order number/total in this section"
+          );
+          message.getThread().addLabel(needsReview);
+          return;
+        }
+
+        const amount = parseAmount_(totalMatch[1]);
+        if (!amount) return; // ₹0 orders exist (e.g. a bundled free installation service) - nothing to record
+
+        // Bound item extraction to this order's own Total line so a
+        // multi-order digest doesn't bleed one order's items into another's.
+        const itemsSection = seg.slice(0, totalMatch.index + totalMatch[0].length);
+        const itemMatches = [...itemsSection.matchAll(/\*\s+([\s\S]+?)\n\s*Quantity:\s*(\d+)/g)]
+          .map((m) => ({ name: m[1].replace(/\s+/g, " ").trim(), qty: m[2] }));
+
+        const itemLabel =
+          itemMatches.length <= 1
+            ? (itemMatches[0] && itemMatches[0].name) || "Amazon order"
+            : itemMatches
+                .map(({ name, qty }) => `${name.slice(0, 40)}${name.length > 40 ? "…" : ""} (x${qty})`)
+                .join("; ");
+
+        appendInvoiceRow_(date, "Amazon", orderIdMatch[1], itemLabel, "shopping", amount, 0);
+        wroteSomething = true;
+      });
+
+      if (wroteSomething) message.getThread().addLabel(processed);
+    });
+  });
+}
+
+// --- Source 16: Coin by Zerodha SIP mutual fund allotments (investments) ----
+
+// Each email is a consolidated allotment report covering one or more funds
+// bought that cycle, as a markdown table: one row per fund, shaped
+// "| <fund name + folio/NAV/stamp-duty details> | ₹<amount> <units> units |".
+// Tracked under the "investments" category, which is deliberately excluded
+// from the This month/Last month spend totals (see lib/analytics.ts) since
+// it's money moved into savings, not consumed.
+function processZerodhaSipInvestments() {
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
+  const threads = GmailApp.search(
+    'from:noreply-coin@qmailer.zerodha.net subject:"Coin by Zerodha - Allotment report" -label:' +
+      PROCESSED_LABEL + ' ' + DATE_FILTER,
+    0, MAX_THREADS_PER_SOURCE
+  );
+  Logger.log("processZerodhaSipInvestments: %s matching threads", threads.length);
+
+  threads.forEach((thread) => {
+    thread.getMessages().forEach((message) => {
+      const body = message.getPlainBody();
+      const date = toIsoDate_(message.getDate());
+      const rows = [...body.matchAll(/\|\s*([^|]+?)\s*Folio no\.:[^|]*\|\s*₹([\d,.]+)\s+[\d.]+\s*units\s*\|/g)];
+
+      rows.forEach((match, i) => {
+        const fund = match[1].trim();
+        const amount = parseAmount_(match[2]);
+        appendInvoiceRow_(date, "Coin by Zerodha", "ZERODHA-" + message.getId() + "-" + i, fund, "investments", amount, 0);
+      });
+
+      if (rows.length > 0) {
+        message.getThread().addLabel(processed);
+      }
+    });
+  });
+}
+
 // --- Explicitly ignored: marketing, OTPs, incoming credits, card-bill ------
 // settlements (would double-count spend already captured via the card-
 // transaction alerts above), and large P2A/IMPS transfers (ambiguous
 // purpose — flagged for manual review instead of guessed at).
 
+// Known fixed-amount IMPS/P2A transfers whose purpose has been confirmed,
+// matched by exact amount since the narration carries no merchant/purpose
+// text to key off. Recorded directly instead of going to Needs_Review; any
+// other amount still gets flagged.
+const KNOWN_IMPS_TRANSFERS = [
+  { amount: 27000, item: "Car loan payment (ICICI)", category: "other" },
+  // SBI -> Mutual Funds SIP, confirmed against a Money Manager cashbook
+  // export ("SBI -> Mutual Funds", note "July month"). The actual SIP debit
+  // happens on the SBI side, which this pipeline doesn't have any Gmail
+  // alerts for at all (SBI only sends monthly PDF statements, no
+  // per-transaction alerts) — so this Axis-side transfer is really the
+  // funding hop that feeds it, not the SIP purchase itself. Still
+  // categorized as investments since the money's ultimate destination is
+  // the same SIP, consistent with how the Zerodha SIP is tracked.
+  { amount: 67870, item: "SIP funding transfer (SBI Mutual Fund)", category: "investments" },
+];
+
 function processIgnoredAndFlaggedNoise() {
   const ignored = getOrCreateLabel_(IGNORED_LABEL);
   const needsReview = getOrCreateLabel_(NEEDS_REVIEW_LABEL);
+  const processed = getOrCreateLabel_(PROCESSED_LABEL);
 
   // Pure noise: never worth a row.
   const ignoreThreads = GmailApp.search(
@@ -633,15 +996,17 @@ function processIgnoredAndFlaggedNoise() {
   Logger.log("processIgnoredAndFlaggedNoise: %s noise threads to ignore", ignoreThreads.length);
   ignoreThreads.forEach((thread) => thread.addLabel(ignored));
 
-  // Large transfers / card-bill settlements: real money movement, but not
-  // confidently categorizable automatically. Flag for a human decision.
+  // Large transfers / card-bill settlements: real money movement, mostly not
+  // confidently categorizable automatically — flagged for a human decision,
+  // except the recognized car-loan transfer above.
   const reviewThreads = GmailApp.search(
     'from:alerts@axis.bank.in subject:"Debit transaction alert" ("IMPS/P2A" OR "CreditCard Payment") ' +
-      '-label:' + NEEDS_REVIEW_LABEL + ' -label:' + IGNORED_LABEL + ' ' + DATE_FILTER,
+      '-label:' + NEEDS_REVIEW_LABEL + ' -label:' + IGNORED_LABEL + ' -label:' + PROCESSED_LABEL + ' ' + DATE_FILTER,
     0, MAX_THREADS_PER_SOURCE
   );
-  Logger.log("processIgnoredAndFlaggedNoise: %s transfer/settlement threads to flag", reviewThreads.length);
+  Logger.log("processIgnoredAndFlaggedNoise: %s transfer/settlement threads to review", reviewThreads.length);
   reviewThreads.forEach((thread) => {
+    let flaggedAny = false;
     thread.getMessages().forEach((message) => {
       const body = message.getPlainBody();
       // Lazy "[^\n]*?by" is important: the sentence ends with a disclaimer
@@ -650,10 +1015,23 @@ function processIgnoredAndFlaggedNoise() {
       // "by IMPS/P2A/..." / "by CreditCard Payment..." clause.
       const match = body.match(/debited with INR ([\d,.]+) on (\d{2}-\d{2}-\d{2,4})[^\n]*?by ([^\n.]+)/);
       if (!match) return;
-      appendNeedsReview_(normalizeAxisDate_(match[2]), "Axis Bank", match[3].trim(), parseAmount_(match[1]), message,
+
+      const amount = parseAmount_(match[1]);
+      const date = normalizeAxisDate_(match[2]);
+      const narration = match[3].trim();
+
+      const known = /IMPS\/P2A/i.test(narration) && KNOWN_IMPS_TRANSFERS.find((t) => t.amount === amount);
+      if (known) {
+        appendInvoiceRow_(date, "Axis Bank", "AXIS-IMPS-" + message.getId(), known.item, known.category, amount, 0);
+        message.getThread().addLabel(processed);
+        return;
+      }
+
+      appendNeedsReview_(date, "Axis Bank", narration, amount, message,
         "Large transfer or card-bill settlement — confirm purpose before categorizing");
+      flaggedAny = true;
     });
-    thread.addLabel(needsReview);
+    if (flaggedAny) thread.addLabel(needsReview);
   });
 }
 
@@ -678,6 +1056,11 @@ function runSpendSenseSync() {
     processAxisMyZoneTransactions,
     processAxisNeoRupayTransactions,
     processScapiaTransactions,
+    processJioFiberBills,
+    processSalaryCredits,
+    processAmazonOrders,
+    processZerodhaSipInvestments,
+    processAxisSavingsUpiTransactions,
     processIgnoredAndFlaggedNoise,
   ];
 
@@ -759,6 +1142,39 @@ function resetSpecificMessages() {
   Logger.log("resetSpecificMessages: un-flagged %s of %s messages", count, messageIds.length);
 }
 
+// TEMPORARY — run this ONCE from the Amazon-order account after a parsing
+// fix to processAmazonOrders, to retry exactly the threads that got flagged
+// under the OLD parser without touching the rest of the Needs_Review
+// backlog. Deletes the matching sheet rows and un-flags just those Gmail
+// threads (leaves every other Needs_Review row alone).
+function resetAmazonNeedsReview() {
+  const sheet = getOrCreateNeedsReviewSheet_();
+  const data = sheet.getDataRange().getValues();
+  const label = getOrCreateLabel_(NEEDS_REVIEW_LABEL);
+
+  const rowsToDelete = [];
+  let unflagged = 0;
+  for (let i = 1; i < data.length; i++) {
+    const [, vendor, description, , gmailLink] = data[i];
+    if (vendor !== "Amazon" || description !== "Order segment didn't match parser format") continue;
+
+    rowsToDelete.push(i + 1); // 1-indexed sheet row
+    const messageId = gmailLink.split("/").pop();
+    try {
+      GmailApp.getMessageById(messageId).getThread().removeLabel(label);
+      unflagged++;
+    } catch (e) {
+      Logger.log("Could not un-flag message %s: %s", messageId, e.message);
+    }
+  }
+
+  rowsToDelete
+    .sort((a, b) => b - a) // bottom-up so earlier deletes don't shift later indices
+    .forEach((row) => sheet.deleteRow(row));
+
+  Logger.log("resetAmazonNeedsReview: deleted %s rows, un-flagged %s threads", rowsToDelete.length, unflagged);
+}
+
 // TEMPORARY DIAGNOSTIC — run this once, then tell Claude it's done. Writes
 // full raw email bodies into a "Debug" sheet tab (Logger.log truncates long
 // entries, a sheet cell doesn't) so the real text format can be inspected
@@ -784,6 +1200,52 @@ function debugDumpSampleBodies() {
   });
 
   Logger.log("Wrote %s sample bodies to the 'Debug' tab.", samples.length);
+}
+
+// TEMPORARY DIAGNOSTIC — run this from the Amazon-order account (not the
+// main one), then tell Claude it's done. processAmazonOrders' regex only
+// matches the ONE order-email shape it's been verified against so far, and
+// real runs have flagged others as "Order segment didn't match parser
+// format" — this pulls a few of those real bodies into the Debug tab (a
+// sheet cell doesn't truncate long text the way Logger.log does) so the
+// actual differing format can be inspected directly. Delete this function
+// and clear the Debug tab once the parser handles them.
+function debugDumpAmazonFailures() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName("Debug");
+  if (!sheet) sheet = ss.insertSheet("Debug");
+  sheet.clear();
+
+  const needsReview = getOrCreateNeedsReviewSheet_();
+  const rows = needsReview.getDataRange().getValues().slice(1); // skip header
+  const failures = rows.filter(
+    ([, vendor, description]) => vendor === "Amazon" && description === "Order segment didn't match parser format"
+  );
+
+  const MAX_SAMPLES = 5;
+  const seen = new Set();
+  let row = 1;
+  let written = 0;
+  for (const failureRow of failures) {
+    if (written >= MAX_SAMPLES) break;
+    const gmailLink = failureRow[4];
+    const messageId = gmailLink.split("/").pop();
+    if (seen.has(messageId)) continue; // one email can produce several flagged segments
+    seen.add(messageId);
+
+    let body;
+    try {
+      body = GmailApp.getMessageById(messageId).getPlainBody();
+    } catch (e) {
+      body = "(couldn't fetch message " + messageId + ": " + e.message + ")";
+    }
+    sheet.getRange(row, 1).setValue(messageId);
+    sheet.getRange(row, 2).setValue(body);
+    row++;
+    written++;
+  }
+
+  Logger.log("debugDumpAmazonFailures: wrote %s sample bodies to the 'Debug' tab (out of %s flagged failures).", written, failures.length);
 }
 
 // --- Budget threshold email alerts ------------------------------------------

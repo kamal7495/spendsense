@@ -1,7 +1,9 @@
 import { google, sheets_v4 } from "googleapis";
 import {
+  AccountBalanceRow,
   BudgetRow,
   Category,
+  IncomeRow,
   InvoiceLineItem,
   InvoiceRow,
   isCategory,
@@ -9,6 +11,8 @@ import {
 
 const INVOICES_SHEET = "Invoices_Raw";
 const BUDGETS_SHEET = "Budgets";
+const ACCOUNT_BALANCES_SHEET = "Account_Balances";
+const INCOME_SHEET = "Income_Raw";
 
 function getEnv(name: string): string {
   const value = process.env[name];
@@ -148,6 +152,96 @@ export async function upsertBudget(category: Category, monthlyTarget: number): P
       valueInputOption: "USER_ENTERED",
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [[category, monthlyTarget]] },
+    });
+  }
+}
+
+/** Reads every data row (excluding the header) from Account_Balances. */
+export async function getAccountBalances(): Promise<AccountBalanceRow[]> {
+  const sheets = getSheetsClient();
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: getSheetId(),
+    range: `${ACCOUNT_BALANCES_SHEET}!A2:C`,
+  });
+
+  const rows = res.data.values ?? [];
+
+  return rows
+    .filter((row) => row.length > 0 && row[0])
+    .map((row): AccountBalanceRow => ({
+      account: String(row[0] ?? ""),
+      openingBalance: toNumber(row[1]),
+      asOfDate: String(row[2] ?? ""),
+    }));
+}
+
+/**
+ * Reads every data row (excluding the header) from Income_Raw. Populated by
+ * the Apps Script salary-credit source, not by this app — there's no upsert
+ * counterpart here. Returns [] if the tab doesn't exist yet (the Apps Script
+ * creates it lazily on the first matched salary credit), so the Dashboard
+ * doesn't break for a user who hasn't run the updated script yet.
+ */
+export async function getIncome(): Promise<IncomeRow[]> {
+  const sheets = getSheetsClient();
+  let rows: string[][];
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: getSheetId(),
+      range: `${INCOME_SHEET}!A2:D`,
+    });
+    rows = (res.data.values as string[][]) ?? [];
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes("Unable to parse range")) return [];
+    throw e;
+  }
+
+  return rows
+    .filter((row) => row.length > 0 && row[0])
+    .map((row): IncomeRow => ({
+      date: String(row[0] ?? ""),
+      source: String(row[1] ?? ""),
+      description: String(row[2] ?? ""),
+      amount: toNumber(row[3]),
+    }));
+}
+
+/**
+ * Sets the opening-balance reference point for an account, updating the
+ * existing row if one exists for that account, or appending a new row
+ * otherwise.
+ */
+export async function upsertAccountBalance(
+  account: string,
+  openingBalance: number,
+  asOfDate: string
+): Promise<void> {
+  const sheets = getSheetsClient();
+  const spreadsheetId = getSheetId();
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${ACCOUNT_BALANCES_SHEET}!A2:C`,
+  });
+  const rows = res.data.values ?? [];
+  const existingIndex = rows.findIndex((row) => row[0] === account);
+
+  if (existingIndex >= 0) {
+    const sheetRow = existingIndex + 2; // account for header row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${ACCOUNT_BALANCES_SHEET}!A${sheetRow}:C${sheetRow}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[account, openingBalance, asOfDate]] },
+    });
+  } else {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${ACCOUNT_BALANCES_SHEET}!A:C`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [[account, openingBalance, asOfDate]] },
     });
   }
 }

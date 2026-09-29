@@ -30,4 +30,5 @@ export const CATEGORY_LABEL: Record<Category, string> = {
   fees: "Fees",
   gifts: "Gifts",
   other: "Other",
+  investments: "Investments",
 };

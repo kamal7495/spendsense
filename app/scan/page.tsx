@@ -55,7 +55,7 @@ export default function ScanReceiptPage() {
     setItems(null);
     setPendingFile(file);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
-    setPreviewUrl(file ? URL.createObjectURL(file) : null);
+    setPreviewUrl(file && file.type !== "application/pdf" ? URL.createObjectURL(file) : null);
   }
 
   async function handleScan() {
@@ -89,7 +89,7 @@ export default function ScanReceiptPage() {
       );
       if (body.warning) setWarning(body.warning);
       if (!body.items?.length) {
-        setError("No items were found on that receipt - try a clearer, well-lit photo.");
+        setError("No items were found on that receipt - try a clearer photo, or a different PDF.");
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to scan receipt");
@@ -164,8 +164,9 @@ export default function ScanReceiptPage() {
       <div>
         <h1 className="text-xl font-semibold">Scan a receipt</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Photograph a grocery store receipt and Claude will read the items, guess a category for
-          each, and let you review everything before it&apos;s added to the sheet.
+          Photograph a receipt, or upload a PDF invoice (e.g. downloaded from an app like Blinkit).
+          Read for free with local OCR/text extraction (no API cost) - rougher than an AI reader,
+          so review everything carefully before it&apos;s added to the sheet.
         </p>
       </div>
 
@@ -173,8 +174,7 @@ export default function ScanReceiptPage() {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
-          capture="environment"
+          accept="image/*,application/pdf"
           onChange={handleFileChange}
           className="block w-full text-sm text-gray-600 file:mr-4 file:rounded-md file:border-0 file:bg-gray-900 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-white hover:file:bg-gray-700"
         />
@@ -183,6 +183,13 @@ export default function ScanReceiptPage() {
           <div className="mt-4">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={previewUrl} alt="Receipt preview" className="max-h-80 rounded-md border border-gray-200" />
+          </div>
+        )}
+
+        {pendingFile && pendingFile.type === "application/pdf" && (
+          <div className="mt-4 flex items-center gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+            <span aria-hidden="true">📄</span>
+            {pendingFile.name}
           </div>
         )}
 

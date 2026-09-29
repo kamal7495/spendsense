@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
   }
   if (typeof mediaType !== "string" || !isSupportedMediaType(mediaType)) {
     return NextResponse.json(
-      { error: "Unsupported image type - use JPEG, PNG, GIF, or WebP" },
+      { error: "Unsupported file type - use JPEG, PNG, GIF, WebP, or PDF" },
       { status: 400 }
     );
   }

@@ -1,14 +1,19 @@
 import { getInvoices } from "@/lib/sheets";
 import {
   frequentItems,
+  groceryCategoryTrend,
   groceryReorderReminders,
   healthSnapshot,
+  itemPurchaseSummary,
   monthlyStaplesList,
+  priceChangeWatch,
 } from "@/lib/analytics";
 import HealthSnapshotCard from "@/components/HealthSnapshotCard";
 import MonthlyStaplesCard from "@/components/MonthlyStaplesCard";
 import GroceryRemindersCard from "@/components/GroceryRemindersCard";
 import FrequentItemsTable from "@/components/FrequentItemsTable";
+import ItemPurchaseSummaryTable from "@/components/ItemPurchaseSummaryTable";
+import PriceWatchCard from "@/components/PriceWatchCard";
 import DateRangeControl from "@/components/DateRangeControl";
 
 export const dynamic = "force-dynamic";
@@ -32,6 +37,9 @@ export default async function GroceriesPage({
   let health: ReturnType<typeof healthSnapshot> | null = null;
   let staples: ReturnType<typeof monthlyStaplesList> = [];
   let reminders: ReturnType<typeof groceryReorderReminders> = [];
+  let purchaseSummary: ReturnType<typeof itemPurchaseSummary> = [];
+  let categoryTrend: ReturnType<typeof groceryCategoryTrend> = [];
+  let priceWatches: ReturnType<typeof priceChangeWatch> = [];
 
   try {
     const invoices = await getInvoices();
@@ -39,6 +47,9 @@ export default async function GroceriesPage({
     health = healthSnapshot(invoices, days);
     staples = monthlyStaplesList(invoices, days);
     reminders = groceryReorderReminders(invoices); // always uses full history for interval accuracy
+    purchaseSummary = itemPurchaseSummary(invoices, days);
+    categoryTrend = groceryCategoryTrend(invoices, days);
+    priceWatches = priceChangeWatch(invoices); // always uses full history to find each item's last 2 purchases
   } catch (e) {
     error = e instanceof Error ? e.message : "Failed to load invoices";
   }
@@ -61,11 +72,16 @@ export default async function GroceriesPage({
 
       <GroceryRemindersCard reminders={reminders} />
 
-      {health && <HealthSnapshotCard snapshot={health} />}
+      <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {health && <HealthSnapshotCard snapshot={health} categoryTrend={categoryTrend} />}
+        <PriceWatchCard watches={priceWatches} />
+      </section>
 
       <MonthlyStaplesCard staples={staples} windowDays={days} />
 
       <FrequentItemsTable items={items} windowDays={days} />
+
+      <ItemPurchaseSummaryTable items={purchaseSummary} windowDays={days} />
     </div>
   );
 }

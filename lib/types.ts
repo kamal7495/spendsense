@@ -35,6 +35,12 @@ export const CATEGORIES = [
   "fees",
   "gifts",
   "other",
+  // Money moved into investments (mutual fund SIPs, etc.) - kept out of the
+  // "This month"/"Last month" spend totals in lib/analytics.ts, since it's
+  // building wealth, not being consumed. Still shows up as its own category
+  // in per-category breakdowns and the budget page, just not folded into
+  // "spend."
+  "investments",
 ] as const;
 
 export type Category = (typeof CATEGORIES)[number];
@@ -64,6 +70,21 @@ export interface InvoiceLineItem {
 export interface BudgetRow {
   category: Category;
   monthlyTarget: number;
+}
+
+export interface AccountBalanceRow {
+  /** Matches an InvoiceRow.vendor exactly, e.g. "Federal Bank (Scapia Card)". */
+  account: string;
+  /** What you owed on this card as of asOfDate - a manually entered reference point. */
+  openingBalance: number;
+  asOfDate: string; // ISO date string
+}
+
+export interface IncomeRow {
+  date: string; // ISO date string
+  source: string;
+  description: string;
+  amount: number;
 }
 
 export function isCategory(value: string): value is Category {

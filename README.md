@@ -14,9 +14,12 @@ dashboard also supports adding items by hand or by scanning a receipt photo.
   table. A date-range control adjusts every section's window.
 - **Budget page** (`/budget`) — editable monthly targets per category. The Apps Script pipeline
   emails an alert once any category crosses 90% of its target.
-- **Scan Receipt** (`/scan`) — photograph or upload a grocery receipt; Claude reads the items,
-  guesses an amount/quantity/category for each, and shows an editable review table before
-  anything is written to the sheet. Requires an `ANTHROPIC_API_KEY` — see below.
+- **Scan Receipt** (`/scan`) — photograph a receipt or upload a PDF invoice (e.g. downloaded from
+  an app like Blinkit); free local text extraction (PDFs) / OCR (photos) plus a keyword-based
+  categorizer read the items, and an editable review table lets you fix anything before it's
+  written to the sheet. No API key, no per-scan cost — see `lib/receiptScan.ts` for how it works
+  and its limitations (it's pattern-matching, not semantic understanding, so it's rougher than an
+  AI reader and needs real review each time).
 
 ## Architecture
 
@@ -46,10 +49,15 @@ fruits, vegetables, meat_seafood, dairy_eggs,
 rice, oils, grains, pulses, spices, sugar, tea_coffee, bakery, instant_food,
 snacks, personal_care, household,
 dining_out, transport, utilities, rent, entertainment, subscriptions,
-shopping, health, travel, transfers, fees, gifts, other
+shopping, health, travel, transfers, fees, gifts, other, investments
 ```
 
 (see `lib/types.ts` for the source of truth, and `lib/labels.ts` for display names)
+
+`investments` (mutual fund SIPs, etc.) is deliberately excluded from the This
+month/Last month totals on the dashboard (`totalSpendForMonth` in
+`lib/analytics.ts`) — it's money moved into savings, not spend. It still
+shows up as its own line in per-category breakdowns and the budget page.
 
 **`Budgets`** (columns A-B, header row + data):
 
@@ -75,9 +83,6 @@ permanent audit trail; never bulk-cleared.
      real newlines — both work)
    - `GOOGLE_SHEET_ID` — the ID from your sheet's URL:
      `https://docs.google.com/spreadsheets/d/SHEET_ID/edit`
-   - `ANTHROPIC_API_KEY` — only needed for the Scan Receipt page; get one at
-     [console.anthropic.com](https://console.anthropic.com/). The rest of the app works fine
-     without it.
 4. **Set up the Gmail sync pipeline** — follow `apps-script/README.md` to populate
    `Invoices_Raw` automatically. (Optional: skip this and add data manually via the API or the
    Scan Receipt page instead.)
@@ -111,10 +116,10 @@ permanent audit trail; never bulk-cleared.
 
 - `GET /api/budgets` — returns all rows from `Budgets`.
 - `POST /api/budgets` — upserts a budget: `{ "category": "fruits", "monthlyTarget": 150 }`.
-- `POST /api/invoices/scan` — extracts line items from a receipt photo. Body:
-  `{ "imageBase64": "...", "mediaType": "image/jpeg" }` (JPEG/PNG/GIF/WebP). Returns
-  `{ vendor, date, items: [{ item, category, amount, quantity }] }` for the client to review —
-  it does not write to the sheet itself. Requires `ANTHROPIC_API_KEY`.
+- `POST /api/invoices/scan` — extracts line items from a receipt/invoice via free local text
+  extraction (PDF) or OCR (photo). Body: `{ "imageBase64": "...", "mediaType": "image/jpeg" }`
+  (JPEG/PNG/GIF/WebP/PDF). Returns `{ vendor, date, items: [{ item, category, amount, quantity }] }`
+  for the client to review — it does not write to the sheet itself. No API key needed.
 
 ## Deploying to Vercel
 
@@ -123,7 +128,6 @@ This project needs zero configuration changes to deploy on Vercel:
 1. Push this repo to GitHub/GitLab/Bitbucket and import it in Vercel, or run `vercel` from this
    directory.
 2. In the Vercel project settings, add the environment variables from `.env.example`
-   (`GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `GOOGLE_SHEET_ID`, and
-   `ANTHROPIC_API_KEY` if you want Scan Receipt to work in production).
-3. Deploy. All data reads/writes and the Claude API call happen server-side via API routes and
-   server components, so no credentials are ever exposed to the browser.
+   (`GOOGLE_SERVICE_ACCOUNT_EMAIL`, `GOOGLE_PRIVATE_KEY`, `GOOGLE_SHEET_ID`).
+3. Deploy. All data reads/writes happen server-side via API routes and server components, so no
+   credentials are ever exposed to the browser.

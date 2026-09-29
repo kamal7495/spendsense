@@ -39,3 +39,6 @@ next-env.d.ts
 service-account*.json
 credentials*.json
 *-key.json
+
+# tesseract.js downloads its OCR language data at runtime into the cwd
+*.traineddata
