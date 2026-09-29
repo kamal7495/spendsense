@@ -146,7 +146,16 @@ account) so only those retry, without touching the rest of the backlog.
   have a different shape than allotments: no "Folio no.:" at all, instead
   "<fund name> NAV: ₹<nav>", plus a trailing disclaimer row ("Amount will be
   credited directly to your bank account...") that's naturally excluded
-  since it has no NAV or units marker to chunk on.
+  since it has no NAV or units marker to chunk on. Both allotments and
+  redemptions also store the real units transacted in the Quantity column
+  (fed into the Next.js app's current-value estimate - see
+  `lib/mutualFunds.ts`), and both search with `INVESTMENT_HISTORY_FILTER`
+  (no lower bound) instead of the global `DATE_FILTER` - unlike day-to-day
+  spend, a fund's current-holdings math needs its FULL history from whenever
+  the SIP started, not just a recent window. A real bug from getting this
+  wrong: with `DATE_FILTER`, 5 of 7 real funds showed negative net units,
+  because their pre-2026 allotments were invisible while later redemptions
+  were fully captured, making still-held funds look over-redeemed.
 - **Amazon order confirmations** → `shopping`, one row per Order # (not per
   item — see "Amazon orders live in a different account" below for why),
   vendor `Amazon`. Every card processor (ICICI, Axis My Zone, Axis Neo

@@ -12,12 +12,14 @@ import {
 import { cashFlowTimeline } from "@/lib/cashflow";
 import { detectRecurringCharges } from "@/lib/recurring";
 import { detectDuplicateCharges, detectOutliers } from "@/lib/anomalies";
+import { getMutualFundPortfolio, MutualFundPortfolio } from "@/lib/mutualFunds";
 import CategoryBarChart from "@/components/CategoryBarChart";
 import CardUsageByCategoryCard from "@/components/CardUsageByCategoryCard";
 import CashFlowCard from "@/components/CashFlowCard";
 import RecurringChargesCard from "@/components/RecurringChargesCard";
 import AnomaliesCard from "@/components/AnomaliesCard";
 import CardBalancesCard from "@/components/CardBalancesCard";
+import MutualFundsCard from "@/components/MutualFundsCard";
 import SavingsRateCard from "@/components/SavingsRateCard";
 import GroceryRemindersCard from "@/components/GroceryRemindersCard";
 import HealthSnapshotCard from "@/components/HealthSnapshotCard";
@@ -58,6 +60,7 @@ export default async function DashboardPage({
   let savingsMonths: ReturnType<typeof savingsRateTrend> = [];
   let reminders: ReturnType<typeof groceryReorderReminders> = [];
   let health: ReturnType<typeof healthSnapshot> | null = null;
+  let mutualFunds: MutualFundPortfolio = { funds: [], totalCurrentValue: 0, totalInvested: 0, unvaluedCount: 0 };
 
   try {
     const [invoices, accountBalances, income] = await Promise.all([
@@ -65,6 +68,7 @@ export default async function DashboardPage({
       getAccountBalances(),
       getIncome(),
     ]);
+    mutualFunds = await getMutualFundPortfolio(invoices); // needs invoices already loaded; live NAV lookups per fund
     const comparison = compareThisMonthToLast(invoices);
     thisMonth = comparison.thisMonth;
     lastMonth = comparison.lastMonth;
@@ -136,6 +140,8 @@ export default async function DashboardPage({
       <CashFlowCard events={cashFlow} />
 
       <CardBalancesCard balances={balances} trackableAccounts={trackableAccounts} />
+
+      <MutualFundsCard portfolio={mutualFunds} />
 
       <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="rounded-lg border border-gray-200 bg-white p-4">

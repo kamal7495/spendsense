@@ -30,6 +30,15 @@ const NEEDS_REVIEW_LABEL = "SpendSense/NeedsReview";
 // after:YYYY/MM/DD syntax is inclusive of that date.
 const DATE_FILTER = "after:2026/01/01";
 
+// Mutual fund holdings (processZerodhaSipInvestments/Redemptions) need FULL
+// transaction history to compute accurate current units held - unlike
+// day-to-day spend tracking, a truncated start date here doesn't just mean
+// "less history," it makes an actively-held fund look over-redeemed (real
+// bug found: 5 of 7 real funds showed negative net units because their
+// early, pre-2026 allotments were invisible to DATE_FILTER while later
+// redemptions were fully captured). No lower bound at all, deliberately.
+const INVESTMENT_HISTORY_FILTER = "";
+
 // Apps Script hard-caps a single execution at 6 minutes. There's ~2 years of
 // mail to backfill, so each run only takes a bounded slice per source —
 // already-labeled threads are excluded from the next search, so repeated
@@ -940,17 +949,21 @@ function processAmazonOrders() {
 // Tracked under the "investments" category, which is deliberately excluded
 // from the This month/Last month spend totals (see lib/analytics.ts) since
 // it's money moved into savings, not consumed.
+// Splitting on a CAPTURING units regex keeps the units figure in the result
+// array (interleaved: [chunk0, units0, chunk1, units1, ..., trailingChunk]) -
+// needed so lib/analytics.ts can compute units held -> current portfolio
+// value via a live NAV lookup, not just money invested.
 function parseZerodhaAllotments_(body) {
   const afterHeader = body.split(/Allotment success|Purchase confirmation/)[1];
   if (!afterHeader) return [];
 
-  const chunks = afterHeader.split(/[\d,]+\.\d+\s*units/);
-  const entryChunks = chunks.slice(0, -1); // last chunk is trailing footer text, not an entry
+  const parts = afterHeader.split(/([\d,]+\.\d+)\s*units/);
 
   const rows = [];
-  entryChunks.forEach((chunk) => {
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const chunk = parts[i];
     const folioIdx = chunk.indexOf("Folio no.:");
-    if (folioIdx === -1) return;
+    if (folioIdx === -1) continue;
 
     let fund = chunk.slice(0, folioIdx).replace(/^\s*Fund\s*Amount\s*/i, "").trim();
     fund = fund.replace(/\s*\n\s*/g, " ").trim();
@@ -958,11 +971,14 @@ function parseZerodhaAllotments_(body) {
     // The last ₹ amount in the chunk is the actual invested amount - NAV and
     // Stamp Duty (both also ₹-prefixed) always appear earlier in the chunk.
     const amountMatches = [...chunk.matchAll(/₹([\d,]+(?:\.\d+)?)/g)];
-    if (amountMatches.length === 0) return;
+    if (amountMatches.length === 0) continue;
     const amount = parseAmount_(amountMatches[amountMatches.length - 1][1]);
+    const units = parseAmount_(parts[i + 1]);
 
-    if (fund && Number.isFinite(amount) && amount > 0) rows.push({ fund, amount });
-  });
+    if (fund && Number.isFinite(amount) && amount > 0 && Number.isFinite(units) && units > 0) {
+      rows.push({ fund, amount, units });
+    }
+  }
 
   return rows;
 }
@@ -971,7 +987,7 @@ function processZerodhaSipInvestments() {
   const processed = getOrCreateLabel_(PROCESSED_LABEL);
   const threads = GmailApp.search(
     'from:noreply-coin@qmailer.zerodha.net subject:"Coin by Zerodha - Allotment report" -label:' +
-      PROCESSED_LABEL + ' ' + DATE_FILTER,
+      PROCESSED_LABEL + ' ' + INVESTMENT_HISTORY_FILTER,
     0, MAX_THREADS_PER_SOURCE
   );
   Logger.log("processZerodhaSipInvestments: %s matching threads", threads.length);
@@ -983,7 +999,7 @@ function processZerodhaSipInvestments() {
       const rows = parseZerodhaAllotments_(body);
 
       rows.forEach((row, i) => {
-        appendInvoiceRow_(date, "Coin by Zerodha", "ZERODHA-" + message.getId() + "-" + i, row.fund, "investments", row.amount, 0);
+        appendInvoiceRow_(date, "Coin by Zerodha", "ZERODHA-" + message.getId() + "-" + i, row.fund, "investments", row.amount, 0, row.units);
       });
 
       if (rows.length > 0) {
@@ -1010,23 +1026,26 @@ function parseZerodhaRedemptions_(body) {
   const afterHeader = body.split(/Redemption success/)[1];
   if (!afterHeader) return [];
 
-  const chunks = afterHeader.split(/[\d,]+\.\d+\s*units/);
-  const entryChunks = chunks.slice(0, -1); // last chunk is trailing footer/disclaimer text
+  const parts = afterHeader.split(/([\d,]+\.\d+)\s*units/);
 
   const rows = [];
-  entryChunks.forEach((chunk) => {
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const chunk = parts[i];
     const navIdx = chunk.indexOf("NAV:");
-    if (navIdx === -1) return;
+    if (navIdx === -1) continue;
 
     let fund = chunk.slice(0, navIdx).replace(/^\s*Fund\s*Amount\s*/i, "").trim();
     fund = fund.replace(/\s*\n\s*/g, " ").trim();
 
     const amountMatches = [...chunk.matchAll(/₹([\d,]+(?:\.\d+)?)/g)];
-    if (amountMatches.length === 0) return;
+    if (amountMatches.length === 0) continue;
     const amount = parseAmount_(amountMatches[amountMatches.length - 1][1]);
+    const units = parseAmount_(parts[i + 1]);
 
-    if (fund && Number.isFinite(amount) && amount > 0) rows.push({ fund, amount });
-  });
+    if (fund && Number.isFinite(amount) && amount > 0 && Number.isFinite(units) && units > 0) {
+      rows.push({ fund, amount, units });
+    }
+  }
 
   return rows;
 }
@@ -1035,7 +1054,7 @@ function processZerodhaSipRedemptions() {
   const processed = getOrCreateLabel_(PROCESSED_LABEL);
   const threads = GmailApp.search(
     'from:noreply-coin@qmailer.zerodha.net subject:"Coin by Zerodha - Redemption report" -label:' +
-      PROCESSED_LABEL + ' ' + DATE_FILTER,
+      PROCESSED_LABEL + ' ' + INVESTMENT_HISTORY_FILTER,
     0, MAX_THREADS_PER_SOURCE
   );
   Logger.log("processZerodhaSipRedemptions: %s matching threads", threads.length);
@@ -1047,9 +1066,11 @@ function processZerodhaSipRedemptions() {
       const rows = parseZerodhaRedemptions_(body);
 
       rows.forEach((row, i) => {
+        // Units stored negative too, so summing quantity across all "Coin by
+        // Zerodha" rows for a fund gives net units currently held.
         appendInvoiceRow_(
           date, "Coin by Zerodha", "ZERODHA-REDEEM-" + message.getId() + "-" + i,
-          row.fund + " (redemption)", "investments", -row.amount, 0
+          row.fund + " (redemption)", "investments", -row.amount, 0, -row.units
         );
       });
 
