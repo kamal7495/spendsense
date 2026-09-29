@@ -22,12 +22,13 @@ export interface BillCycle {
 
 export const BILL_CYCLES: BillCycle[] = [
   { label: "Axis Neo Rupay", vendors: ["Axis Neo Rupay (XX82)"], statementCloseDay: 21 },
+  { label: "Axis My Zone", vendors: ["Axis My Zone (XX85)"], statementCloseDay: 21 },
   { label: "Scapia (Federal Bank)", vendors: ["Federal Bank (Scapia Card)"], statementCloseDay: 21 },
   { label: "ICICI Bank", vendors: ["ICICI Bank Credit Card"], statementCloseDay: 21 },
 ];
 
-// Confirmed by the user: all three cards' payment is due 3 weeks (21 days)
-// after their statement closes.
+// Confirmed by the user: all cards' payment is due 3 weeks (21 days) after
+// their statement closes.
 export const PAYMENT_DUE_OFFSET_DAYS = 21;
 
 function lineTotal(r: InvoiceRow): number {
